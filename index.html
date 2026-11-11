@@ -280,6 +280,7 @@ https://shifen-haoyun.github.io/shifen-haoyun/」
 var CONTRACT = "0x8B050D60F1dCCE7323cA9D68Bf164040b60416b3";
 var RPCS = ["https://bsc-rpc.publicnode.com", "https://bsc-dataseed.binance.org", "https://bsc-dataseed1.defibit.io"];
 var PRICE_WEI = 1000000000000000n;
+var WC_PROJECT_ID = "ff5985647ed78916bed0155d2ff84a1c";
 var state = { end: 0, offset: 0, round: 0 };
 
 function rpc(method, params) {
@@ -379,6 +380,34 @@ function loadWinners(lastSettled) {
   }
 }
 
+/* wallet: prefer injected window.ethereum, otherwise WalletConnect (loadWC copied from Gavel) */
+var activeProvider = null;
+async function loadWC() {
+  for (const u of ["https://unpkg.com/@walletconnect/ethereum-provider@2.21.0/dist/index.umd.js", "https://cdn.jsdelivr.net/npm/@walletconnect/ethereum-provider@2.21.0/dist/index.umd.js"]) {
+    try {
+      await new Promise((res, rej) => { const s = document.createElement("script"); s.src = u; s.onload = res; s.onerror = rej; document.head.appendChild(s); });
+      if (window["@walletconnect/ethereum-provider"]) return true;
+    } catch (e) { /* try next CDN */ }
+  }
+  return false;
+}
+function getProvider() {
+  if (activeProvider) return Promise.resolve(activeProvider);
+  if (window.ethereum) { activeProvider = window.ethereum; return Promise.resolve(activeProvider); }
+  document.getElementById("buyMsg").textContent = "正在打开 WalletConnect…";
+  return loadWC().then(function (ok) {
+    if (!ok) throw new Error("WalletConnect 加载失败，请检查网络后重试，或改走下方代理通道。");
+    return window["@walletconnect/ethereum-provider"].EthereumProvider.init({
+      projectId: WC_PROJECT_ID, chains: [56], optionalChains: [56], showQrModal: true,
+      rpcMap: { 56: RPCS[0] }
+    });
+  }).then(async function (provider) {
+    await provider.connect();
+    activeProvider = provider;
+    return provider;
+  });
+}
+
 /* buy panel */
 var qty = 1;
 function chQty(d) {
@@ -388,21 +417,22 @@ function chQty(d) {
 }
 function buyNow() {
   var msg = document.getElementById("buyMsg");
-  if (!window.ethereum) { msg.textContent = "未检测到钱包插件：请用支持 BNB 链的钱包浏览器打开本页，或改走代理通道。"; return; }
   msg.textContent = "正在连接钱包…";
-  window.ethereum.request({ method: "eth_requestAccounts" }).then(function (accs) {
-    return window.ethereum.request({ method: "eth_chainId" }).then(function (cid) {
-      if (cid !== "0x38") {
-        return window.ethereum.request({ method: "wallet_switchEthereumChain", params: [{ chainId: "0x38" }] })
-          .then(function () { return accs; });
-      }
-      return accs;
+  getProvider().then(function (provider) {
+    return provider.request({ method: "eth_requestAccounts" }).then(function (accs) {
+      return provider.request({ method: "eth_chainId" }).then(function (cid) {
+        if (cid !== "0x38") {
+          return provider.request({ method: "wallet_switchEthereumChain", params: [{ chainId: "0x38" }] })
+            .then(function () { return accs; });
+        }
+        return accs;
+      });
+    }).then(function (accs) {
+      var data = "0xd96a094a" + BigInt(qty).toString(16).padStart(64, "0");
+      var value = "0x" + (PRICE_WEI * BigInt(qty)).toString(16);
+      return provider.request({ method: "eth_sendTransaction",
+        params: [{ from: accs[0], to: CONTRACT, data: data, value: value }] });
     });
-  }).then(function (accs) {
-    var data = "0xd96a094a" + BigInt(qty).toString(16).padStart(64, "0");
-    var value = "0x" + (PRICE_WEI * BigInt(qty)).toString(16);
-    return window.ethereum.request({ method: "eth_sendTransaction",
-      params: [{ from: accs[0], to: CONTRACT, data: data, value: value }] });
   }).then(function (tx) {
     msg.innerHTML = "✅ 已提交！交易哈希：" + tx + "<br>在本轮开奖前，你的票已上链。祝你好运 🍀";
     setTimeout(refresh, 4000);
